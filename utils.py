@@ -17,6 +17,7 @@ from scipy.signal import decimate, resample_poly, firwin, lfilter
 
 
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')    
 
 def resample(signal, fs):
     # downsample the signal to a sample rate of 256 Hz
@@ -69,15 +70,12 @@ def read_train_data(file_name):
 
 def cut_data(raw_data):
     raw_data = np.array(raw_data).astype(np.float64)
-    total = int(len(raw_data[0]) / 1024)
-    for i in range(total):
-        table = raw_data[:, i * 1024:(i + 1) * 1024]
-        filename = './temp2/' + str(i) + '.csv'
-        with open(filename, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerows(table)
-    return total
+    raw_data_shape =  raw_data.shape
+    total = np.zeros((raw_data_shape[0], 1024, raw_data_shape[1] // 1024))
 
+    for i in range(raw_data_shape[1] // 1024):
+        total[:,:,i] = raw_data[:, i * 1024:(i + 1) * 1024]
+    return total
 
 def glue_data(file_name, total, output):
     gluedata = 0
@@ -124,34 +122,34 @@ def decode_data(data, std_num, mode=5):
     
     if mode == "ICUNet":
         # 1. read name
-        model = cumbersome_model2.UNet1(n_channels=30, n_classes=30)
+        model = cumbersome_model2.UNet1(n_channels=30, n_classes=30).to(device)
         resumeLoc = './model/ICUNet/modelsave' + '/checkpoint.pth.tar'
         # 2. load model
-        checkpoint = torch.load(resumeLoc, map_location='cpu')
+        checkpoint = torch.load(resumeLoc, map_location=device)
         model.load_state_dict(checkpoint['state_dict'], False)
         model.eval()
         # 3. decode strategy
         with torch.no_grad():
             data = data[np.newaxis, :, :]
-            data = torch.Tensor(data)
+            data = torch.Tensor(data).to(device)
             decode = model(data)
 
       
     elif mode == "ICUNet++" or mode == "ICUNet_attn":
         # 1. read name
         if mode == "ICUNet++":
-            model = UNet_family.NestedUNet3(num_classes=30)
+            model = UNet_family.NestedUNet3(num_classes=30).to(device)
         elif mode == "ICUNet_attn":
-            model = UNet_attention.UNetpp3_Transformer(num_classes=30)
+            model = UNet_attention.UNetpp3_Transformer(num_classes=30).to(device)
         resumeLoc = './model/'+ mode + '/modelsave' + '/checkpoint.pth.tar'
         # 2. load model
-        checkpoint = torch.load(resumeLoc, map_location='cpu')
+        checkpoint = torch.load(resumeLoc, map_location=device)
         model.load_state_dict(checkpoint['state_dict'], False)
         model.eval()
         # 3. decode strategy
         with torch.no_grad():
             data = data[np.newaxis, :, :]
-            data = torch.Tensor(data)
+            data = torch.Tensor(data).to(device)
             decode1, decode2, decode = model(data)
 
 
@@ -159,36 +157,28 @@ def decode_data(data, std_num, mode=5):
         # 1. read name
         resumeLoc = './model/' + mode + '/modelsave/checkpoint.pth.tar'
         # 2. load model
-        checkpoint = torch.load(resumeLoc, map_location='cpu')
-        model = tf_model.make_model(30, 30, N=2)
+        checkpoint = torch.load(resumeLoc, map_location=device)
+        model = tf_model.make_model(30, 30, N=2).to(device)
         model.load_state_dict(checkpoint['state_dict'])
         model.eval()
         # 3. decode strategy
         with torch.no_grad():
-            data = torch.FloatTensor(data)
+            data = torch.FloatTensor(data).to(device)
             data = data.unsqueeze(0)
             src = data
-            tgt = data # you can modify to randomize data
+            tgt = ((torch.rand(data.shape)-0.5)*200).to(device) # you can modify to randomize data
             batch = tf_data.Batch(src, tgt, 0)
             out = model.forward(batch.src, batch.src[:,:,1:], batch.src_mask, batch.trg_mask)
             decode = model.generator(out)
             decode = decode.permute(0, 2, 1)
-            add_tensor = torch.zeros(1, 30, 1)
+            add_tensor = torch.zeros(1, 30, 1).to(device)
             decode = torch.cat((decode, add_tensor), dim=2)
-
     # 4. numpy
     #print(decode.shape)
     decode = np.array(decode.cpu()).astype(np.float64)
     return decode
 
 def preprocessing(filename, samplerate):
-    # establish temp folder
-    try:
-        os.mkdir("./temp2/")
-    except OSError as e:
-        dataDelete("./temp2/")
-        os.mkdir("./temp2/")
-        print(e)
     
     # read data
     signal = read_train_data(filename)
@@ -209,9 +199,8 @@ def preprocessing(filename, samplerate):
 def reconstruct(model_name, total, outputfile):
     # -------------------decode_data---------------------------
     second1 = time.time()
-    for i in range(total):
-        file_name = './temp2/{}.csv'.format(str(i))
-        data_noise = read_train_data(file_name)
+    for i in range(total.shape[2]):
+        data_noise = np.squeeze(total[:,:,i])
         
         std = np.std(data_noise)
         avg = np.average(data_noise)
@@ -220,16 +209,8 @@ def reconstruct(model_name, total, outputfile):
 
         # Deep Learning Artifact Removal
         d_data = decode_data(data_noise, std, model_name)
-        d_data = d_data[0]
-
-        outputname = "./temp2/output{}.csv".format(str(i))
-        save_data(d_data, outputname)
-
-    # --------------------glue_data----------------------------
-    glue_data("./temp2/", total, outputfile)
-    # -------------------delete_data---------------------------
-    dataDelete("./temp2/")
+        total[:,:,i] = d_data[0]
+    np.save(outputfile, total)
     second2 = time.time()
 
-    print("Using", model_name,"model to reconstruct", outputfile, " has been success in", second2 - second1, "sec(s)")
-
+    print(f"Using {model_name} model to reconstruct has been success in %.2f sec(s)" %(second2 - second1) )
