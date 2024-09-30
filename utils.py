@@ -178,10 +178,10 @@ def decode_data(data, std_num, mode=5):
     decode = np.array(decode.cpu()).astype(np.float64)
     return decode
 
-def preprocessing(filename, samplerate):
+def preprocessing(signal, samplerate):
     
     # read data
-    signal = read_train_data(filename)
+    # signal = read_train_data(filename)
     #print(signal.shape)
     # resample
     signal = resample(signal, samplerate)
@@ -214,3 +214,15 @@ def reconstruct(model_name, total, outputfile):
     second2 = time.time()
 
     print(f"Using {model_name} model to reconstruct has been success in %.2f sec(s)" %(second2 - second1) )
+
+def sclicedata(total, outputfile):
+    for i in range(total.shape[2]):
+        data_noise = np.squeeze(total[:,:,i])
+        
+        std = np.std(data_noise)
+        avg = np.average(data_noise)
+
+        data_noise = (data_noise-avg)/std
+        
+        total[:,:,i] = data_noise
+    np.save(outputfile, total)
